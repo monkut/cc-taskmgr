@@ -55,10 +55,19 @@ class FilterBar(Static):
         self._projects_by_org = projects_by_org
 
         org_select = self.query_one("#org-select", Select)
+        project_select = self.query_one("#project-select", Select)
         org_options = [ALL_OPTION, *((o, o) for o in self._orgs)]
-        org_select.set_options(org_options)
 
-        self._update_project_options()
+        with org_select.prevent(Select.Changed), project_select.prevent(Select.Changed):
+            org_select.set_options(org_options)
+            self._update_project_options()
+
+    def update_projects(self, projects_by_org: dict[str, list[Project]]) -> None:
+        """Update project data and refresh the project dropdown without touching org select."""
+        self._projects_by_org = projects_by_org
+        project_select = self.query_one("#project-select", Select)
+        with project_select.prevent(Select.Changed):
+            self._update_project_options()
 
     def _update_project_options(self) -> None:
         project_select = self.query_one("#project-select", Select)
