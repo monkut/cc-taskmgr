@@ -20,7 +20,13 @@ license = "BSD-3-Clause"
 license-files = ["LICENSE"]
 
 
-dependencies = []
+dependencies = [
+    "textual>=1.0.0",
+    "tomli-w>=1.0.0",
+]
+
+[project.scripts]
+tony = "tony.app:main"
 
 [project.urls]
 Repository = "https://github.com/kiconiaworks/cc-taskmgr"
@@ -44,6 +50,7 @@ exclude = []  # exclude packages matching these glob patterns (empty by default)
 
 # Task runner
 [tool.poe.tasks]
+run = "uv run tony"
 check = "uv run ruff check"
 typecheck = "uv run pyright"
 

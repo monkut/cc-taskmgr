@@ -1,14 +1,30 @@
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
 
-if TYPE_CHECKING:
-    from pathlib import Path
+from tony.models import DATETIME_SENTINEL
 
-logger = logging.getLogger(__name__)
+_TIME_THRESHOLDS = [
+    (31536000, "y"),
+    (2592000, "mo"),
+    (86400, "d"),
+    (3600, "h"),
+    (60, "m"),
+]
 
 
-def process(filepath: Path, output_directory: Path) -> None:
-    logger.debug(f"filepath={filepath}")
-    logger.debug(f"output_directory={output_directory}")
+def format_relative_time(dt: datetime) -> str:
+    if dt == DATETIME_SENTINEL:
+        return ""
+
+    now = datetime.now(UTC)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+
+    seconds = int((now - dt).total_seconds())
+
+    for threshold, suffix in _TIME_THRESHOLDS:
+        if seconds >= threshold:
+            return f"{seconds // threshold}{suffix} ago"
+
+    return "just now"
