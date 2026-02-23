@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Markdown, Static, TextArea
 
@@ -25,12 +25,19 @@ class IssueDetail(Static):
     class BackRequested(Message):
         pass
 
+    @dataclass
+    class ActionRequested(Message):
+        issue: Issue
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._issue: Issue | None = None
 
     def compose(self) -> ComposeResult:
-        yield Button("< Back", id="back-btn", variant="default")
+        with Horizontal(id="detail-toolbar"):
+            yield Button("< Back", id="back-btn", variant="default")
+            yield Button("Execute Action", id="execute-action-btn", variant="warning")
+            yield Static("", id="action-status")
         yield Static("", id="issue-header")
         with VerticalScroll(id="detail-scroll"):
             yield Markdown("", id="issue-body")
@@ -67,9 +74,17 @@ class IssueDetail(Static):
         comment_input = self.query_one("#comment-input", TextArea)
         comment_input.clear()
 
+    def set_action_status(self, text: str) -> None:
+        status = self.query_one("#action-status", Static)
+        status.update(text)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "back-btn":
             self.post_message(self.BackRequested())
+            return
+
+        if event.button.id == "execute-action-btn" and self._issue:
+            self.post_message(self.ActionRequested(issue=self._issue))
             return
 
         if event.button.id == "submit-comment" and self._issue:

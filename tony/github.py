@@ -4,12 +4,18 @@ import asyncio
 import json
 import logging
 import subprocess
+import time
+from pathlib import Path
 
 from tony.models import Comment, Issue, Project
 
 logger = logging.getLogger(__name__)
 
 RATE_LIMIT_MARKER = "rate limit"
+CACHE_TTL = 300  # 5 minutes
+
+_projects_cache: dict[str, tuple[float, list[Project]]] = {}
+_item_keys_cache: dict[tuple[str, int], tuple[float, set[str]]] = {}
 
 
 class GitHubRateLimitError(Exception):
@@ -154,6 +160,10 @@ async def add_comment(repo: str, number: int, body: str) -> bool:
 
 
 def fetch_projects_sync(owner: str, *, limit: int = 100) -> list[Project]:
+    cached = _projects_cache.get(owner)
+    if cached and time.monotonic() - cached[0] < CACHE_TTL:
+        return cached[1]
+
     result = _run_gh(
         [
             "project",
@@ -177,7 +187,9 @@ def fetch_projects_sync(owner: str, *, limit: int = 100) -> list[Project]:
         logger.exception(f"Failed to parse gh project list output: {result.stdout[:200]}")
         return []
 
-    return [Project.from_dict(p) for p in data.get("projects", [])]
+    projects = [Project.from_dict(p) for p in data.get("projects", [])]
+    _projects_cache[owner] = (time.monotonic(), projects)
+    return projects
 
 
 async def fetch_projects(owner: str, *, limit: int = 100) -> list[Project]:
@@ -186,6 +198,11 @@ async def fetch_projects(owner: str, *, limit: int = 100) -> list[Project]:
 
 def fetch_project_item_keys_sync(owner: str, project_number: int, *, limit: int = 1000) -> set[str]:
     """Return set of 'owner/repo#number' keys for issues in a project."""
+    cache_key = (owner, project_number)
+    cached = _item_keys_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < CACHE_TTL:
+        return cached[1]
+
     result = _run_gh(
         [
             "project",
@@ -217,11 +234,41 @@ def fetch_project_item_keys_sync(owner: str, project_number: int, *, limit: int 
         number = content.get("number")
         if repo and number is not None:
             keys.add(f"{repo}#{number}")
+    _item_keys_cache[cache_key] = (time.monotonic(), keys)
     return keys
 
 
 async def fetch_project_item_keys(owner: str, project_number: int, *, limit: int = 1000) -> set[str]:
     return await asyncio.to_thread(fetch_project_item_keys_sync, owner, project_number, limit=limit)
+
+
+def add_label_sync(repo: str, number: int, label: str) -> bool:
+    result = _run_gh(["issue", "edit", str(number), "--repo", repo, "--add-label", label])
+    return result.returncode == 0
+
+
+async def add_label(repo: str, number: int, label: str) -> bool:
+    return await asyncio.to_thread(add_label_sync, repo, number, label)
+
+
+def find_repo_dir(project_dirs: list[str], repo_name: str) -> Path | None:
+    """Walk 1-level subdirs of each project dir looking for a directory matching repo_name."""
+    for dir_path in project_dirs:
+        parent = Path(dir_path).expanduser()
+        if not parent.is_dir():
+            continue
+        # Check direct match
+        candidate = parent / repo_name
+        if candidate.is_dir():
+            return candidate
+        # Check 1-level subdirs
+        try:
+            for child in parent.iterdir():
+                if child.is_dir() and child.name == repo_name:
+                    return child
+        except PermissionError:
+            continue
+    return None
 
 
 def fetch_comments_sync(repo: str, number: int) -> list[Comment]:

@@ -19,6 +19,7 @@ class AppConfig:
     default_state: str = "open"
     max_issues: int = 100
     excluded_orgs: list[str] = field(default_factory=list)
+    project_dirs: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> AppConfig:
@@ -34,6 +35,7 @@ class AppConfig:
             default_state=data.get("default_state", "open"),
             max_issues=data.get("max_issues", 100),
             excluded_orgs=data.get("excluded_orgs", []),
+            project_dirs=data.get("project_dirs", []),
         )
 
     def save(self, path: Path = CONFIG_FILE) -> None:
@@ -43,6 +45,7 @@ class AppConfig:
             "default_state": self.default_state,
             "max_issues": self.max_issues,
             "excluded_orgs": self.excluded_orgs,
+            "project_dirs": self.project_dirs,
         }
         with path.open("wb") as f:
             tomli_w.dump(data, f)

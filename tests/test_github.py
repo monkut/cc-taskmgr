@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tony import github
 from tony.github import (
     GitHubRateLimitError,
     add_comment_sync,
@@ -11,6 +12,14 @@ from tony.github import (
     fetch_project_item_keys_sync,
     fetch_projects_sync,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches() -> None:
+    """Clear module-level caches before each test."""
+    github._projects_cache.clear()
+    github._item_keys_cache.clear()
+
 
 SAMPLE_SEARCH_RESULT = [
     {

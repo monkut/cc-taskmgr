@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from operator import attrgetter
 from typing import TYPE_CHECKING
@@ -8,6 +9,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 from rich.text import Text
+from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import DataTable
 
@@ -30,8 +32,14 @@ SORT_KEY_MAP: dict[str, str] = {
     "Updated": "updated_at",
 }
 
+SORTABLE_COLUMNS = [col for col in COLUMNS if col in SORT_KEY_MAP]
+
 
 class IssueTable(DataTable):
+    BINDINGS = [
+        Binding("enter", "activate", "Open", priority=True, show=True),
+    ]
+
     @dataclass
     class IssueSelected(Message):
         issue: Issue
@@ -43,18 +51,24 @@ class IssueTable(DataTable):
         self._sort_column: str = "Updated"
         self._sort_reverse: bool = True
         self._project_issue_keys: set[str] | None = None
+        self._focused_header: int | None = None
 
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.zebra_stripes = True
         for col in COLUMNS:
-            self.add_column(self._column_label(col), key=col, width=COLUMN_WIDTHS.get(col))
+            self.add_column(self._build_column_label(col), key=col, width=COLUMN_WIDTHS.get(col))
 
-    def _column_label(self, col: str) -> str:
-        if col != self._sort_column:
-            return col
-        arrow = " ▼" if self._sort_reverse else " ▲"
-        return f"{col}{arrow}"
+    def _build_column_label(self, col: str) -> Text:
+        arrow = ""
+        if col == self._sort_column:
+            arrow = " ▼" if self._sort_reverse else " ▲"
+        label_str = f"{col}{arrow}"
+        focused_idx = self._focused_header
+        is_focused = focused_idx is not None and SORTABLE_COLUMNS[focused_idx] == col
+        if is_focused:
+            return Text(f"▸{label_str}◂", style="bold yellow")
+        return Text(label_str)
 
     def load_issues(self, issues: list[Issue]) -> None:
         self._issues = issues
@@ -94,7 +108,10 @@ class IssueTable(DataTable):
         for col in COLUMNS:
             column_obj = self.columns.get(col)
             if column_obj:
-                column_obj.label = Text(self._column_label(col))
+                column_obj.label = self._build_column_label(col)
+        self._update_count += 1
+        self._clear_caches()
+        self.refresh()
 
     def _render_rows(self) -> None:
         self.clear()
@@ -110,11 +127,35 @@ class IssueTable(DataTable):
                 key=f"{issue.repository}#{issue.number}",
             )
 
+    def set_header_focus(self, index: int | None) -> None:
+        self._focused_header = index
+        self._update_column_labels()
+        self._update_enter_binding()
+
+    def _update_enter_binding(self) -> None:
+        desc = "Sort" if self._focused_header is not None else "Open"
+        bindings = self._bindings.key_to_bindings.get("enter", [])
+        for i, binding in enumerate(bindings):
+            if binding.action == "activate":
+                bindings[i] = dataclasses.replace(binding, description=desc)
+                break
+        self.refresh_bindings()
+
+    def action_activate(self) -> None:
+        if self._focused_header is not None:
+            self.sort_by(SORTABLE_COLUMNS[self._focused_header])
+        else:
+            row_idx = self.cursor_row
+            if 0 <= row_idx < len(self._filtered_issues):
+                self.post_message(self.IssueSelected(issue=self._filtered_issues[row_idx]))
+
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         col_key = str(event.column_key)
         self.sort_by(col_key)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if self._focused_header is not None:
+            return
         row_idx = event.cursor_row
         if 0 <= row_idx < len(self._filtered_issues):
             self.post_message(self.IssueSelected(issue=self._filtered_issues[row_idx]))
