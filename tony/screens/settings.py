@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -48,21 +49,28 @@ class SettingsScreen(ModalScreen[tuple[str, list[str]] | None]):
         if not username:
             return None
         dirs_text = self.query_one("#project-dirs-input", TextArea).text
-        project_dirs = [d.strip() for d in dirs_text.splitlines() if d.strip()]
+        project_dirs = [str(Path(d.strip()).expanduser()) for d in dirs_text.splitlines() if d.strip()]
         return (username, project_dirs)
+
+    def _validate_and_save(self) -> None:
+        result = self._get_result()
+        if not result:
+            return
+        _username, project_dirs = result
+        for d in project_dirs:
+            if not Path(d).is_dir():
+                self.notify(f"{d} not found!", severity="error", timeout=10)
+                return
+        self.dismiss(result)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save-btn":
-            result = self._get_result()
-            if result:
-                self.dismiss(result)
+            self._validate_and_save()
         elif event.button.id == "cancel-btn":
             self.action_cancel()
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
-        result = self._get_result()
-        if result:
-            self.dismiss(result)
+        self._validate_and_save()
 
     def action_cancel(self) -> None:
         self.dismiss(None)

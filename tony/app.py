@@ -61,6 +61,8 @@ class TonyApp(App):
         self._nav_index: int = self._NAV_ROWS
         self._running_actions: dict[str, subprocess.Popen] = {}
         self._running_action_modes: dict[str, str] = {}
+        self._initial_load_done: bool = False
+        self._status_text: str = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -148,6 +150,13 @@ class TonyApp(App):
 
         orgs = sorted({i.org for i in issues if i.org})
 
+        # Eagerly fetch projects for all orgs so the project filter is populated
+        for org in orgs:
+            try:
+                self._projects_by_org[org] = await fetch_projects(org)
+            except GitHubRateLimitError:
+                logger.warning(f"Rate limited fetching projects for {org}")
+
         self._cleanup_loading()
 
         table = self.query_one("#issue-table", IssueTable)
@@ -155,11 +164,14 @@ class TonyApp(App):
         table.load_issues(issues)
 
         filter_bar = self.query_one("#filters", FilterBar)
-        filter_bar.update_options(orgs, {})
+        filter_bar.update_options(orgs, self._projects_by_org)
 
+        self._initial_load_done = True
         self._set_status(f"Loaded {len(issues)} issues for {self._config.github_username}")
 
     def on_filter_bar_changed(self, event: FilterBar.Changed) -> None:
+        if not self._initial_load_done:
+            return
         self._set_status("Filtering...")
         self.run_worker(self._apply_filter(event.org, event.project_key))
 
@@ -175,10 +187,7 @@ class TonyApp(App):
                 return
 
             filter_bar = self.query_one("#filters", FilterBar)
-            filter_bar.update_options(
-                sorted({i.org for i in self._issues if i.org}),
-                self._projects_by_org,
-            )
+            filter_bar.update_projects(self._projects_by_org)
 
         project_keys: set[str] | None = None
         if project_key != "__all__":
@@ -195,6 +204,8 @@ class TonyApp(App):
 
         table = self.query_one("#issue-table", IssueTable)
         table.filter_issues(org=org, project_keys=project_keys)
+        if table.issue_count == 0:
+            self.notify("No 'assigned' issues for selected filters", severity="warning")
         self._set_status(f"Showing {table.issue_count} issues")
 
     def on_issue_table_issue_selected(self, event: IssueTable.IssueSelected) -> None:
@@ -268,9 +279,9 @@ class TonyApp(App):
 
     def on_issue_detail_action_requested(self, event: IssueDetail.ActionRequested) -> None:
         issue = event.issue
-        key = f"{issue.repository}#{issue.number}"
-        if key in self._running_actions:
-            self.notify("Action already running for this issue", severity="warning")
+        if self._running_actions:
+            running_key = next(iter(self._running_actions))
+            self.notify(f"Action already running for {running_key}", severity="warning")
             return
 
         def handle_mode(mode: str | None) -> None:
@@ -303,7 +314,7 @@ class TonyApp(App):
         cwd = str(repo_dir) if repo_dir else None
         if not cwd:
             self.notify(
-                f"No project directory found for '{issue.repo}'. Add project dirs in Settings.",
+                f"Related repository, {issue.repository}, NOT found, cannot run EXECUTE ACTION",
                 severity="error",
                 timeout=10,
             )
@@ -321,6 +332,7 @@ class TonyApp(App):
         self._running_action_modes[key] = mode
         self._update_action_status_for_issue(issue)
         self._update_status_bar_actions()
+        self._sync_table_running_actions()
         self._set_status(f"Action '{mode}' started for {key}")
 
         # Wait for completion in background thread
@@ -330,6 +342,7 @@ class TonyApp(App):
         self._running_action_modes.pop(key, None)
         self._update_action_status_for_issue(issue)
         self._update_status_bar_actions()
+        self._sync_table_running_actions()
 
         if proc.returncode == 0:
             self.notify(f"Action '{mode}' completed for {key}", severity="information")
@@ -345,24 +358,17 @@ class TonyApp(App):
             return
         key = f"{issue.repository}#{issue.number}"
         mode = self._running_action_modes.get(key)
-        if mode:
-            detail.set_action_status(f"[bold yellow]Action running: {mode}[/bold yellow]")
-        else:
-            detail.set_action_status("")
+        detail.set_action_status(mode or "")
+
+    def _sync_table_running_actions(self) -> None:
+        try:
+            table = self.query_one("#issue-table", IssueTable)
+            table.set_running_actions(set(self._running_action_modes.keys()))
+        except LookupError:
+            pass
 
     def _update_status_bar_actions(self) -> None:
-        count = len(self._running_actions)
-        if count > 0:
-            suffix = f" | {count} action{'s' if count != 1 else ''} running"
-        else:
-            suffix = ""
-        status = self.query_one("#status-bar", Static)
-        current = status.renderable
-        text = str(current)
-        # Strip any previous action suffix
-        if " | " in text and "action" in text.rsplit(" | ", maxsplit=1)[-1]:
-            text = text.rsplit(" | ", 1)[0]
-        status.update(text + suffix)
+        self._render_status_bar()
 
     def action_focus_next(self) -> None:
         if self._showing_detail:
@@ -413,8 +419,14 @@ class TonyApp(App):
             self._show_list()
 
     def _set_status(self, message: str) -> None:
+        self._status_text = message
+        self._render_status_bar()
+
+    def _render_status_bar(self) -> None:
+        count = len(self._running_actions)
+        suffix = f" | {count} action{'s' if count != 1 else ''} running" if count > 0 else ""
         status = self.query_one("#status-bar", Static)
-        status.update(message)
+        status.update(self._status_text + suffix)
 
 
 def main() -> None:

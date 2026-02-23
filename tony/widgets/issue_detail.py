@@ -4,8 +4,10 @@ import logging
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
+from textual.timer import Timer
 from textual.widgets import Button, Markdown, Static, TextArea
 
 from tony.functions import format_relative_time
@@ -14,7 +16,14 @@ from tony.models import Issue
 logger = logging.getLogger(__name__)
 
 
+SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+
 class IssueDetail(Static):
+    BINDINGS = [
+        Binding("escape", "request_back", "Back", priority=True),
+    ]
+
     @dataclass
     class CommentSubmitted(Message):
         repo: str
@@ -32,6 +41,9 @@ class IssueDetail(Static):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._issue: Issue | None = None
+        self._spinner_timer: Timer | None = None
+        self._spinner_index: int = 0
+        self._action_mode: str = ""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="detail-toolbar"):
@@ -74,9 +86,31 @@ class IssueDetail(Static):
         comment_input = self.query_one("#comment-input", TextArea)
         comment_input.clear()
 
-    def set_action_status(self, text: str) -> None:
+    def set_action_status(self, mode: str) -> None:
+        self._action_mode = mode
+        if mode:
+            self._spinner_index = 0
+            self._update_spinner_display()
+            if self._spinner_timer is None:
+                self._spinner_timer = self.set_interval(0.1, self._tick_spinner)
+        else:
+            if self._spinner_timer is not None:
+                self._spinner_timer.stop()
+                self._spinner_timer = None
+            status = self.query_one("#action-status", Static)
+            status.update("")
+
+    def _tick_spinner(self) -> None:
+        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        self._update_spinner_display()
+
+    def _update_spinner_display(self) -> None:
+        frame = SPINNER_FRAMES[self._spinner_index]
         status = self.query_one("#action-status", Static)
-        status.update(text)
+        status.update(f"[bold yellow]{frame} Action running: {self._action_mode}[/bold yellow]")
+
+    def action_request_back(self) -> None:
+        self.post_message(self.BackRequested())
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "back-btn":
