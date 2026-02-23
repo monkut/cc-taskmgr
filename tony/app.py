@@ -193,7 +193,12 @@ class TonyApp(App):
         self.run_worker(self._fetch_detail(issue.repository, issue.number))
 
     async def _fetch_detail(self, repo: str, number: int) -> None:
-        full_issue = await fetch_issue_detail(repo, number)
+        try:
+            full_issue = await fetch_issue_detail(repo, number)
+        except GitHubRateLimitError:
+            self._set_status("[red]GitHub API rate limit exceeded[/red]")
+            self.notify("GitHub API rate limit exceeded", severity="error", timeout=10)
+            return
         if full_issue:
             detail = self.query_one("#issue-detail", IssueDetail)
             detail.display_issue(full_issue)
@@ -217,16 +222,26 @@ class TonyApp(App):
         self.run_worker(self._post_comment(event.repo, event.number, event.body))
 
     async def _post_comment(self, repo: str, number: int, body: str) -> None:
-        success = await add_comment(repo, number, body)
-        if success:
-            self._set_status("Comment posted, refreshing...")
-            full_issue = await fetch_issue_detail(repo, number)
-            if full_issue:
-                detail = self.query_one("#issue-detail", IssueDetail)
-                detail.display_issue(full_issue)
-                self._set_status(f"Comment posted on {repo}#{number}")
-        else:
+        try:
+            success = await add_comment(repo, number, body)
+        except GitHubRateLimitError:
+            self._set_status("[red]GitHub API rate limit exceeded[/red]")
+            self.notify("GitHub API rate limit exceeded", severity="error", timeout=10)
+            return
+        if not success:
             self._set_status("[red]Failed to post comment[/red]")
+            return
+        self._set_status("Comment posted, refreshing...")
+        try:
+            full_issue = await fetch_issue_detail(repo, number)
+        except GitHubRateLimitError:
+            self._set_status("[red]Comment posted but rate limited on refresh[/red]")
+            self.notify("GitHub API rate limit exceeded", severity="error", timeout=10)
+            return
+        if full_issue:
+            detail = self.query_one("#issue-detail", IssueDetail)
+            detail.display_issue(full_issue)
+            self._set_status(f"Comment posted on {repo}#{number}")
 
     def action_refresh(self) -> None:
         if self._showing_detail:
