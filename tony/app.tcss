@@ -2,17 +2,45 @@ Screen {
     background: $surface;
 }
 
-#filter-bar {
-    height: 3;
-    padding: 0 1;
+/* Filter bar - prominent row at top */
+FilterBar {
+    height: auto;
+    max-height: 5;
     dock: top;
+    background: $boost;
+    border-bottom: solid $primary;
 }
 
-#filter-bar Select {
+#filter-bar {
+    height: auto;
+    width: 100%;
+    padding: 0 1;
+}
+
+.filter-label {
+    width: auto;
+    height: 1;
+    text-style: bold;
+    color: $accent;
+    margin: 1 0 0 0;
+}
+
+#org-select {
+    width: 30%;
+}
+
+#project-select {
     width: 1fr;
-    margin: 0 1;
 }
 
+/* Issue table */
+IssueTable {
+    height: 1fr;
+}
+
+/* No focus border — avoids layout distortion in small terminals */
+
+/* Status bar */
 #status-bar {
     dock: bottom;
     height: 1;
@@ -21,10 +49,7 @@ Screen {
     color: $text;
 }
 
-IssueTable {
-    height: 1fr;
-}
-
+/* Issue detail view */
 IssueDetail {
     height: 1fr;
 }

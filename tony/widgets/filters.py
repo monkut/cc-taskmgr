@@ -1,32 +1,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Select, Static
+from textual.widgets import Label, Select, Static
+
+if TYPE_CHECKING:
+    from tony.models import Project
 
 ALL_OPTION = ("All", "__all__")
 
 
 class FilterBar(Static):
+    can_focus = False
+
     org: reactive[str] = reactive("__all__")
-    repo: reactive[str] = reactive("__all__")
+    project: reactive[str] = reactive("__all__")
 
     @dataclass
     class Changed(Message):
         org: str
-        repo: str
+        project_key: str
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._orgs: list[str] = []
-        self._repos_by_org: dict[str, list[str]] = {}
+        self._projects_by_org: dict[str, list[Project]] = {}
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="filter-bar"):
+            yield Label("Org:", classes="filter-label")
             yield Select[str](
                 [ALL_OPTION],
                 prompt="Org",
@@ -34,42 +41,46 @@ class FilterBar(Static):
                 allow_blank=False,
                 value="__all__",
             )
+            yield Label("Project:", classes="filter-label")
             yield Select[str](
                 [ALL_OPTION],
-                prompt="Repo",
-                id="repo-select",
+                prompt="Project",
+                id="project-select",
                 allow_blank=False,
                 value="__all__",
             )
 
-    def update_options(self, orgs: list[str], repos_by_org: dict[str, list[str]]) -> None:
+    def update_options(self, orgs: list[str], projects_by_org: dict[str, list[Project]]) -> None:
         self._orgs = sorted(orgs)
-        self._repos_by_org = repos_by_org
+        self._projects_by_org = projects_by_org
 
         org_select = self.query_one("#org-select", Select)
         org_options = [ALL_OPTION, *((o, o) for o in self._orgs)]
         org_select.set_options(org_options)
 
-        self._update_repo_options()
+        self._update_project_options()
 
-    def _update_repo_options(self) -> None:
-        repo_select = self.query_one("#repo-select", Select)
+    def _update_project_options(self) -> None:
+        project_select = self.query_one("#project-select", Select)
 
         if self.org == "__all__":
-            all_repos = sorted({r for repos in self._repos_by_org.values() for r in repos})
+            projects = [p for ps in self._projects_by_org.values() for p in ps]
         else:
-            all_repos = sorted(self._repos_by_org.get(self.org, []))
+            projects = self._projects_by_org.get(self.org, [])
 
-        repo_options = [ALL_OPTION, *((r, r) for r in all_repos)]
-        repo_select.set_options(repo_options)
+        project_options: list[tuple[str, str]] = [ALL_OPTION]
+        for p in sorted(projects, key=lambda x: x.title):
+            key = f"{p.owner}/{p.number}"
+            project_options.append((p.title, key))
+        project_select.set_options(project_options)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         select_id = event.select.id
         if select_id == "org-select":
             self.org = str(event.value) if event.value is not None else "__all__"
-            self.repo = "__all__"
-            self._update_repo_options()
-        elif select_id == "repo-select":
-            self.repo = str(event.value) if event.value is not None else "__all__"
+            self.project = "__all__"
+            self._update_project_options()
+        elif select_id == "project-select":
+            self.project = str(event.value) if event.value is not None else "__all__"
 
-        self.post_message(self.Changed(org=self.org, repo=self.repo))
+        self.post_message(self.Changed(org=self.org, project_key=self.project))

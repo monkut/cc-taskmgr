@@ -111,6 +111,27 @@ class Issue:
         )
 
 
+@dataclass
+class Project:
+    number: int
+    title: str
+    owner: str
+    url: str = ""
+    item_count: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Project:
+        owner_data = data.get("owner", {})
+        owner_login = owner_data.get("login", "") if isinstance(owner_data, dict) else str(owner_data)
+        return cls(
+            number=data.get("number", 0),
+            title=data.get("title", ""),
+            owner=owner_login,
+            url=data.get("url", ""),
+            item_count=data.get("items", {}).get("totalCount", 0),
+        )
+
+
 def _parse_datetime(value: str) -> datetime:
     if not value:
         return DATETIME_SENTINEL

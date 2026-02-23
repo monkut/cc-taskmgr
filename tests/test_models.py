@@ -1,4 +1,4 @@
-from tony.models import DATETIME_SENTINEL, Comment, Issue, Label, _parse_datetime
+from tony.models import DATETIME_SENTINEL, Comment, Issue, Label, Project, _parse_datetime
 
 
 class TestParseDateTime:
@@ -116,3 +116,25 @@ class TestIssue:
         issue = Issue.from_dict(data)
         assert len(issue.comments) == 1
         assert issue.comments[0].author == "bob"
+
+
+class TestProject:
+    def test_from_dict(self):
+        data = {
+            "number": 42,
+            "title": "Sprint Board",
+            "owner": {"login": "myorg", "type": "Organization"},
+            "url": "https://github.com/orgs/myorg/projects/42",
+            "items": {"totalCount": 10},
+        }
+        project = Project.from_dict(data)
+        assert project.number == 42  # noqa: PLR2004
+        assert project.title == "Sprint Board"
+        assert project.owner == "myorg"
+        assert project.item_count == 10  # noqa: PLR2004
+
+    def test_from_dict_minimal(self):
+        project = Project.from_dict({"number": 1, "title": "Test"})
+        assert project.number == 1
+        assert project.title == "Test"
+        assert project.owner == ""

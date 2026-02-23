@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from textual.app import App, ComposeResult
 from textual.widgets import Footer, Header, LoadingIndicator, Static
 
 from tony.config import AppConfig
-from tony.github import add_comment, check_gh_auth, fetch_issue_detail, fetch_issues
-from tony.models import Issue
+from tony.github import (
+    GitHubRateLimitError,
+    add_comment,
+    check_gh_auth,
+    fetch_issue_detail,
+    fetch_issues,
+    fetch_project_item_keys,
+    fetch_projects,
+)
+from tony.models import Issue, Project
 from tony.screens.settings import SettingsScreen
 from tony.widgets.filters import FilterBar
 from tony.widgets.issue_detail import IssueDetail
@@ -32,6 +41,7 @@ class TonyApp(App):
         self._config = AppConfig.load()
         self._issues: list[Issue] = []
         self._showing_detail = False
+        self._projects_by_org: dict[str, list[Project]] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -76,41 +86,93 @@ class TonyApp(App):
         self.run_worker(self._fetch_and_display(), exclusive=True)
 
     async def _fetch_and_display(self) -> None:
-        issues = await fetch_issues(
-            self._config.github_username,
-            state=self._config.default_state,
-            limit=self._config.max_issues,
-        )
-        self._issues = issues
+        try:
+            await self._do_fetch_and_display()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to fetch and display issues")
+            self._cleanup_loading()
+            self._set_status("[red]Error loading issues — check logs[/red]")
+            self.notify("Error loading issues", severity="error", timeout=10)
 
+    def _cleanup_loading(self) -> None:
         try:
             loading = self.query_one("#loading-indicator", LoadingIndicator)
             loading.remove()
         except (LookupError, ValueError):
             pass
+        try:
+            table = self.query_one("#issue-table", IssueTable)
+            table.display = True
+        except (LookupError, ValueError):
+            pass
+
+    async def _do_fetch_and_display(self) -> None:
+        rate_limited = False
+
+        try:
+            issues = await fetch_issues(
+                self._config.github_username,
+                state=self._config.default_state,
+                limit=self._config.max_issues,
+            )
+        except GitHubRateLimitError:
+            issues = []
+            rate_limited = True
+
+        self._issues = issues
+
+        orgs = sorted({i.org for i in issues if i.org})
+        issue_keys = {f"{i.repository}#{i.number}" for i in issues}
+
+        self._projects_by_org = {}
+        if not rate_limited:
+            try:
+                org_projects = await asyncio.gather(*(fetch_projects(org) for org in orgs))
+                for org, projects in zip(orgs, org_projects, strict=True):
+                    if not projects:
+                        continue
+                    item_keys_list = await asyncio.gather(*(fetch_project_item_keys(org, p.number) for p in projects))
+                    relevant = [p for p, keys in zip(projects, item_keys_list, strict=True) if keys & issue_keys]
+                    if relevant:
+                        self._projects_by_org[org] = relevant
+            except GitHubRateLimitError:
+                rate_limited = True
+
+        self._cleanup_loading()
 
         table = self.query_one("#issue-table", IssueTable)
         table.display = True
         table.load_issues(issues)
 
-        self._update_filters(issues)
-        self._set_status(f"Loaded {len(issues)} issues for {self._config.github_username}")
-
-    def _update_filters(self, issues: list[Issue]) -> None:
-        orgs = sorted({i.org for i in issues if i.org})
-        repos_by_org: dict[str, list[str]] = {}
-        for issue in issues:
-            if issue.org:
-                repos_by_org.setdefault(issue.org, [])
-                if issue.repo not in repos_by_org[issue.org]:
-                    repos_by_org[issue.org].append(issue.repo)
-
         filter_bar = self.query_one("#filters", FilterBar)
-        filter_bar.update_options(orgs, repos_by_org)
+        filter_bar.update_options(orgs, self._projects_by_org)
+
+        if rate_limited:
+            self._set_status("[red]GitHub API rate limit exceeded — try again later[/red]")
+            self.notify("GitHub API rate limit exceeded — try again later", severity="error", timeout=10)
+        else:
+            self._set_status(f"Loaded {len(issues)} issues for {self._config.github_username}")
 
     def on_filter_bar_changed(self, event: FilterBar.Changed) -> None:
+        self._set_status("Filtering...")
+        self.run_worker(self._apply_filter(event.org, event.project_key))
+
+    async def _apply_filter(self, org: str, project_key: str) -> None:
+        project_keys: set[str] | None = None
+        if project_key != "__all__":
+            parts = project_key.split("/", 1)
+            if len(parts) > 1:
+                owner = parts[0]
+                project_number = int(parts[1])
+                try:
+                    project_keys = await fetch_project_item_keys(owner, project_number)
+                except GitHubRateLimitError:
+                    self._set_status("[red]GitHub API rate limit exceeded[/red]")
+                    self.notify("GitHub API rate limit exceeded", severity="error", timeout=10)
+                    return
+
         table = self.query_one("#issue-table", IssueTable)
-        table.filter_issues(org=event.org, repo=event.repo)
+        table.filter_issues(org=org, project_keys=project_keys)
         self._set_status(f"Showing {table.issue_count} issues")
 
     def on_issue_table_issue_selected(self, event: IssueTable.IssueSelected) -> None:

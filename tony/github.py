@@ -5,9 +5,16 @@ import json
 import logging
 import subprocess
 
-from tony.models import Comment, Issue
+from tony.models import Comment, Issue, Project
 
 logger = logging.getLogger(__name__)
+
+RATE_LIMIT_MARKER = "rate limit"
+
+
+class GitHubRateLimitError(Exception):
+    """Raised when the GitHub API rate limit is exceeded."""
+
 
 GH_SEARCH_FIELDS = [
     "number",
@@ -40,7 +47,10 @@ GH_DETAIL_FIELDS = [
 def _run_gh(args: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     cmd = ["gh", *args]
     logger.debug(f"Running: {' '.join(cmd)}")
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)  # noqa: S603
+    if result.returncode != 0 and RATE_LIMIT_MARKER in (result.stderr or ""):
+        raise GitHubRateLimitError(result.stderr.strip())
+    return result
 
 
 def check_gh_auth() -> bool:
@@ -141,6 +151,77 @@ def add_comment_sync(repo: str, number: int, body: str) -> bool:
 
 async def add_comment(repo: str, number: int, body: str) -> bool:
     return await asyncio.to_thread(add_comment_sync, repo, number, body)
+
+
+def fetch_projects_sync(owner: str, *, limit: int = 100) -> list[Project]:
+    result = _run_gh(
+        [
+            "project",
+            "list",
+            "--owner",
+            owner,
+            "--format",
+            "json",
+            "--limit",
+            str(limit),
+        ]
+    )
+
+    if result.returncode != 0:
+        logger.error(f"gh project list failed for {owner}: {result.stderr}")
+        return []
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.exception(f"Failed to parse gh project list output: {result.stdout[:200]}")
+        return []
+
+    return [Project.from_dict(p) for p in data.get("projects", [])]
+
+
+async def fetch_projects(owner: str, *, limit: int = 100) -> list[Project]:
+    return await asyncio.to_thread(fetch_projects_sync, owner, limit=limit)
+
+
+def fetch_project_item_keys_sync(owner: str, project_number: int, *, limit: int = 1000) -> set[str]:
+    """Return set of 'owner/repo#number' keys for issues in a project."""
+    result = _run_gh(
+        [
+            "project",
+            "item-list",
+            str(project_number),
+            "--owner",
+            owner,
+            "--format",
+            "json",
+            "--limit",
+            str(limit),
+        ]
+    )
+
+    if result.returncode != 0:
+        logger.error(f"gh project item-list failed: {result.stderr}")
+        return set()
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.exception(f"Failed to parse project items: {result.stdout[:200]}")
+        return set()
+
+    keys: set[str] = set()
+    for item in data.get("items", []):
+        content = item.get("content", {})
+        repo = content.get("repository", "")
+        number = content.get("number")
+        if repo and number is not None:
+            keys.add(f"{repo}#{number}")
+    return keys
+
+
+async def fetch_project_item_keys(owner: str, project_number: int, *, limit: int = 1000) -> set[str]:
+    return await asyncio.to_thread(fetch_project_item_keys_sync, owner, project_number, limit=limit)
 
 
 def fetch_comments_sync(repo: str, number: int) -> list[Comment]:

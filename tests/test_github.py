@@ -1,7 +1,16 @@
 import json
 from unittest.mock import MagicMock, patch
 
-from tony.github import add_comment_sync, fetch_issue_detail_sync, fetch_issues_sync
+import pytest
+
+from tony.github import (
+    GitHubRateLimitError,
+    add_comment_sync,
+    fetch_issue_detail_sync,
+    fetch_issues_sync,
+    fetch_project_item_keys_sync,
+    fetch_projects_sync,
+)
 
 SAMPLE_SEARCH_RESULT = [
     {
@@ -101,3 +110,79 @@ class TestAddCommentSync:
         mock_run.return_value = MagicMock(returncode=1, stderr="error")
         result = add_comment_sync("org/repo", EXPECTED_ISSUE_NUMBER, "My comment")
         assert result is False
+
+
+SAMPLE_PROJECTS = {
+    "projects": [
+        {
+            "number": 1,
+            "title": "Sprint Board",
+            "owner": {"login": "myorg", "type": "Organization"},
+            "url": "https://github.com/orgs/myorg/projects/1",
+            "items": {"totalCount": 5},
+        },
+    ],
+    "totalCount": 1,
+}
+
+SAMPLE_PROJECT_ITEMS = {
+    "items": [
+        {
+            "content": {
+                "type": "Issue",
+                "number": 42,
+                "repository": "org/repo",
+                "title": "Fix the bug",
+            },
+            "id": "PVTI_123",
+        },
+        {
+            "content": {
+                "type": "Issue",
+                "number": 10,
+                "repository": "org/other-repo",
+                "title": "Another issue",
+            },
+            "id": "PVTI_456",
+        },
+    ],
+    "totalCount": 2,
+}
+
+
+class TestFetchProjectsSync:
+    @patch("tony.github._run_gh")
+    def test_success(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(SAMPLE_PROJECTS))
+        projects = fetch_projects_sync("myorg")
+        assert len(projects) == 1
+        assert projects[0].title == "Sprint Board"
+        assert projects[0].owner == "myorg"
+
+    @patch("tony.github._run_gh")
+    def test_failure(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(returncode=1, stderr="error")
+        projects = fetch_projects_sync("myorg")
+        assert projects == []
+
+
+class TestFetchProjectItemKeysSync:
+    @patch("tony.github._run_gh")
+    def test_success(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(SAMPLE_PROJECT_ITEMS))
+        keys = fetch_project_item_keys_sync("myorg", 1)
+        assert keys == {"org/repo#42", "org/other-repo#10"}
+
+    @patch("tony.github._run_gh")
+    def test_failure(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(returncode=1, stderr="error")
+        keys = fetch_project_item_keys_sync("myorg", 1)
+        assert keys == set()
+
+
+class TestRateLimitDetection:
+    @patch("tony.github._run_gh")
+    def test_rate_limit_raises(self, mock_run: MagicMock):
+        mock_run.side_effect = GitHubRateLimitError("API rate limit exceeded for user ID 123")
+        with pytest.raises(GitHubRateLimitError):
+            fetch_project_item_keys_sync("myorg", 1)
