@@ -8,9 +8,11 @@ from tony.github import (
     GitHubRateLimitError,
     add_comment_sync,
     fetch_issue_detail_sync,
+    fetch_issue_project_status_sync,
     fetch_issues_sync,
     fetch_project_item_keys_sync,
     fetch_projects_sync,
+    is_in_review_status,
 )
 
 
@@ -187,6 +189,66 @@ class TestFetchProjectItemKeysSync:
         mock_run.return_value = MagicMock(returncode=1, stderr="error")
         keys = fetch_project_item_keys_sync("myorg", 1)
         assert keys == set()
+
+
+SAMPLE_PROJECT_STATUS_RESPONSE = {
+    "data": {
+        "repository": {
+            "issue": {
+                "projectItems": {
+                    "nodes": [
+                        {"fieldValueByName": {"name": "In Progress"}},
+                        {"fieldValueByName": {"name": "In Review"}},
+                    ]
+                }
+            }
+        }
+    }
+}
+
+SAMPLE_PROJECT_STATUS_EMPTY = {"data": {"repository": {"issue": {"projectItems": {"nodes": []}}}}}
+
+
+class TestFetchIssueProjectStatusSync:
+    @patch("tony.github._run_gh")
+    def test_success(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(SAMPLE_PROJECT_STATUS_RESPONSE))
+        statuses = fetch_issue_project_status_sync("org", "repo", 42)
+        assert statuses == ["In Progress", "In Review"]
+
+    @patch("tony.github._run_gh")
+    def test_empty(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps(SAMPLE_PROJECT_STATUS_EMPTY))
+        statuses = fetch_issue_project_status_sync("org", "repo", 42)
+        assert statuses == []
+
+    @patch("tony.github._run_gh")
+    def test_failure(self, mock_run: MagicMock):
+        mock_run.return_value = MagicMock(returncode=1, stderr="error")
+        statuses = fetch_issue_project_status_sync("org", "repo", 42)
+        assert statuses == []
+
+
+class TestIsInReviewStatus:
+    @patch("tony.github.fetch_issue_project_status_sync")
+    def test_in_review(self, mock_fetch: MagicMock):
+        mock_fetch.return_value = ["In Review"]
+        assert is_in_review_status("org", "repo", 42) is True
+
+    @patch("tony.github.fetch_issue_project_status_sync")
+    def test_in_internal_review(self, mock_fetch: MagicMock):
+        mock_fetch.return_value = ["In Internal Review"]
+        assert is_in_review_status("org", "repo", 42) is True
+
+    @patch("tony.github.fetch_issue_project_status_sync")
+    def test_not_in_review(self, mock_fetch: MagicMock):
+        mock_fetch.return_value = ["In Progress"]
+        assert is_in_review_status("org", "repo", 42) is False
+
+    @patch("tony.github.fetch_issue_project_status_sync")
+    def test_empty(self, mock_fetch: MagicMock):
+        mock_fetch.return_value = []
+        assert is_in_review_status("org", "repo", 42) is False
 
 
 class TestRateLimitDetection:

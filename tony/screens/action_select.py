@@ -5,7 +5,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-ASKCC_MODES = ["plan", "develop", "review", "explore", "diagnose"]
+ASKCC_MODES = ["plan", "develop", "review", "explore", "diagnose", "automated"]
 
 
 class ActionSelectScreen(ModalScreen[str | None]):

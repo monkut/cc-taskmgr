@@ -14,16 +14,19 @@ from tony.github import (
     add_label,
     check_gh_auth,
     fetch_issue_detail,
+    fetch_issue_project_status,
     fetch_issues,
     fetch_project_item_keys,
     fetch_projects,
     find_repo_dir,
+    is_in_review_status,
 )
 from tony.models import Issue, Project
 from tony.screens.action_select import ActionSelectScreen
 from tony.screens.confirm_action import ConfirmActionScreen
 from tony.screens.settings import SettingsScreen
 from tony.widgets.filters import FilterBar
+from tony.widgets.in_progress import InProgressBar
 from tony.widgets.issue_detail import IssueDetail
 from tony.widgets.issue_table import SORTABLE_COLUMNS, IssueTable
 
@@ -66,6 +69,7 @@ class TonyApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield InProgressBar(id="in-progress")
         yield FilterBar(id="filters")
         yield IssueTable(id="issue-table")
         yield IssueDetail(id="issue-detail")
@@ -166,8 +170,14 @@ class TonyApp(App):
         filter_bar = self.query_one("#filters", FilterBar)
         filter_bar.update_options(orgs, self._projects_by_org)
 
+        in_progress = self.query_one("#in-progress", InProgressBar)
+        in_progress.update_issues(issues)
+
         self._initial_load_done = True
         self._set_status(f"Loaded {len(issues)} issues for {self._config.github_username}")
+
+        # Start polling for in-progress issue status
+        self.set_interval(60, self._poll_in_progress_status)
 
     def on_filter_bar_changed(self, event: FilterBar.Changed) -> None:
         if not self._initial_load_done:
@@ -215,10 +225,12 @@ class TonyApp(App):
         self._showing_detail = True
         table = self.query_one("#issue-table", IssueTable)
         filters = self.query_one("#filters", FilterBar)
+        in_progress = self.query_one("#in-progress", InProgressBar)
         detail = self.query_one("#issue-detail", IssueDetail)
 
         table.display = False
         filters.display = False
+        in_progress.display = False
         detail.display = True
         detail.display_issue(issue)
         self._update_action_status_for_issue(issue)
@@ -245,9 +257,12 @@ class TonyApp(App):
         self._showing_detail = False
         table = self.query_one("#issue-table", IssueTable)
         filters = self.query_one("#filters", FilterBar)
+        in_progress = self.query_one("#in-progress", InProgressBar)
         detail = self.query_one("#issue-detail", IssueDetail)
 
         detail.display = False
+        in_progress.display = True
+        in_progress.update_issues(self._issues)
         filters.display = True
         table.display = True
 
@@ -297,7 +312,10 @@ class TonyApp(App):
     def _on_action_confirmed(self, mode: str | None, issue: Issue) -> None:
         if mode is None:
             return
-        self.run_worker(self._execute_action(mode, issue))
+        if mode == "automated":
+            self.run_worker(self._execute_automated(issue))
+        else:
+            self.run_worker(self._execute_action(mode, issue))
 
     async def _execute_action(self, mode: str, issue: Issue) -> None:
         key = f"{issue.repository}#{issue.number}"
@@ -348,6 +366,103 @@ class TonyApp(App):
             self.notify(f"Action '{mode}' completed for {key}", severity="information")
         else:
             self.notify(f"Action '{mode}' failed for {key} (exit {proc.returncode})", severity="error")
+
+    async def _execute_automated(self, issue: Issue) -> None:
+        """Run askcc steps (plan → develop → review) sequentially, stopping at review status."""
+        key = f"{issue.repository}#{issue.number}"
+        steps = ["plan", "develop", "review"]
+
+        # Add label
+        try:
+            await add_label(issue.repository, issue.number, "action:automated")
+        except GitHubRateLimitError:
+            self.notify("Rate limited adding label", severity="error")
+            return
+
+        # Resolve working directory
+        repo_dir = find_repo_dir(self._config.project_dirs, issue.repo)
+        cwd = str(repo_dir) if repo_dir else None
+        if not cwd:
+            self.notify(
+                f"Related repository, {issue.repository}, NOT found, cannot run EXECUTE ACTION",
+                severity="error",
+                timeout=10,
+            )
+            return
+
+        for step in steps:
+            # Check if already in review before starting step
+            try:
+                in_review = await asyncio.to_thread(is_in_review_status, issue.org, issue.repo, issue.number)
+            except GitHubRateLimitError:
+                in_review = False
+            if in_review:
+                self.notify(f"Issue {key} reached review status, stopping automated action", severity="information")
+                break
+
+            # Update tracking to show current step
+            self._running_action_modes[key] = f"auto: {step}"
+            self._update_action_status_for_issue(issue)
+            self._update_status_bar_actions()
+            self._sync_table_running_actions()
+
+            cmd = ["askcc", step, "--github-issue-url", issue.url]
+            try:
+                proc = await asyncio.to_thread(_start_process, cmd, cwd)
+            except FileNotFoundError:
+                self.notify("askcc not found — ensure it is installed and on PATH", severity="error")
+                break
+
+            self._running_actions[key] = proc
+            self._set_status(f"Automated '{step}' started for {key}")
+
+            await asyncio.to_thread(proc.wait)
+            self._running_actions.pop(key, None)
+
+            if proc.returncode != 0:
+                self.notify(f"Automated step '{step}' failed for {key} (exit {proc.returncode})", severity="error")
+                break
+
+            # Check project status after step completes
+            try:
+                in_review = await asyncio.to_thread(is_in_review_status, issue.org, issue.repo, issue.number)
+            except GitHubRateLimitError:
+                in_review = False
+            if in_review:
+                self.notify(f"Issue {key} reached review status after '{step}'", severity="information")
+                break
+
+        # Cleanup
+        self._running_actions.pop(key, None)
+        self._running_action_modes.pop(key, None)
+        self._update_action_status_for_issue(issue)
+        self._update_status_bar_actions()
+        self._sync_table_running_actions()
+        self._set_status(f"Automated action completed for {key}")
+
+    async def _poll_in_progress_status(self) -> None:
+        """Fetch project column status for in-progress issues and update the bar."""
+        in_progress = self.query_one("#in-progress", InProgressBar)
+        action_issues: list[Issue] = []
+        for issue in self._issues:
+            for label in issue.labels:
+                if label.name.startswith("action:"):
+                    action_issues.append(issue)
+                    break
+
+        if not action_issues:
+            return
+
+        statuses: dict[str, str] = {}
+        for issue in action_issues:
+            try:
+                project_statuses = await fetch_issue_project_status(issue.org, issue.repo, issue.number)
+                if project_statuses:
+                    statuses[f"{issue.repository}#{issue.number}"] = project_statuses[0]
+            except GitHubRateLimitError:
+                logger.warning(f"Rate limited polling status for {issue.repository}#{issue.number}")
+
+        in_progress.update_statuses(statuses)
 
     def _update_action_status_for_issue(self, issue: Issue) -> None:
         if not self._showing_detail:

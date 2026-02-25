@@ -2,6 +2,30 @@ Screen {
     background: $surface;
 }
 
+/* In-progress bar */
+InProgressBar {
+    height: auto;
+    dock: top;
+    background: $boost;
+    border-bottom: solid $accent;
+}
+
+#in-progress-section {
+    height: auto;
+    width: 100%;
+}
+
+#in-progress-summary {
+    height: auto;
+    width: 100%;
+    padding: 0 1;
+}
+
+#in-progress-detail {
+    padding: 0 2;
+    margin: 0 0 1 0;
+}
+
 /* Filter bar - prominent row at top */
 FilterBar {
     height: auto;

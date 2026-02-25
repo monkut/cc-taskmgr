@@ -271,6 +271,70 @@ def find_repo_dir(project_dirs: list[str], repo_name: str) -> Path | None:
     return None
 
 
+REVIEW_STATUSES = {"in-internal-review", "in-review"}
+
+_PROJECT_STATUS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      projectItems(first: 10) {
+        nodes {
+          fieldValueByName(name: "Status") {
+            ... on ProjectV2ItemFieldSingleSelectValue {
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_issue_project_status_sync(owner: str, repo_name: str, number: int) -> list[str]:
+    """Fetch project Status field values for an issue via GraphQL."""
+    query = _PROJECT_STATUS_QUERY.strip()
+    variables = json.dumps({"owner": owner, "repo": repo_name, "number": number})
+    result = _run_gh(
+        ["api", "graphql", "-f", f"query={query}", "-f", f"variables={variables}"],
+        timeout=15,
+    )
+    if result.returncode != 0:
+        logger.error(f"GraphQL project status query failed: {result.stderr}")
+        return []
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.exception(f"Failed to parse project status response: {result.stdout[:200]}")
+        return []
+
+    statuses: list[str] = []
+    issue_data = data.get("data", {}).get("repository", {}).get("issue")
+    if not issue_data:
+        return []
+    for node in issue_data.get("projectItems", {}).get("nodes", []):
+        field_value = node.get("fieldValueByName")
+        if field_value and "name" in field_value:
+            statuses.append(field_value["name"])
+    return statuses
+
+
+async def fetch_issue_project_status(owner: str, repo_name: str, number: int) -> list[str]:
+    return await asyncio.to_thread(fetch_issue_project_status_sync, owner, repo_name, number)
+
+
+def is_in_review_status(owner: str, repo_name: str, number: int) -> bool:
+    """Check if an issue is in a review-like project column."""
+    statuses = fetch_issue_project_status_sync(owner, repo_name, number)
+    for s in statuses:
+        normalized = s.lower().replace(" ", "-")
+        if normalized in REVIEW_STATUSES:
+            return True
+    return False
+
+
 def fetch_comments_sync(repo: str, number: int) -> list[Comment]:
     result = _run_gh(
         [
