@@ -5,6 +5,7 @@ import logging
 import subprocess
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import Footer, Header, LoadingIndicator, Static
 
 from tony.config import AppConfig
@@ -42,6 +43,8 @@ class TonyApp(App):
     TITLE = "Tony - GitHub Issue Manager"
 
     BINDINGS = [
+        Binding("up", "issue_up", show=False, priority=True),
+        Binding("down", "issue_down", show=False, priority=True),
         ("r", "refresh", "Refresh"),
         ("s", "settings", "Settings"),
         ("q", "quit", "Quit"),
@@ -69,8 +72,8 @@ class TonyApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield InProgressBar(id="in-progress")
         yield FilterBar(id="filters")
+        yield InProgressBar(id="in-progress")
         yield IssueTable(id="issue-table")
         yield IssueDetail(id="issue-detail")
         yield Static("", id="status-bar")
@@ -528,6 +531,25 @@ class TonyApp(App):
 
     def action_settings(self) -> None:
         self._prompt_settings()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in ("issue_up", "issue_down"):
+            return not self._showing_detail
+        return True
+
+    def action_issue_up(self) -> None:
+        table = self.query_one("#issue-table", IssueTable)
+        if self._nav_index != self._NAV_ROWS:
+            self._nav_index = self._NAV_ROWS
+            self._apply_nav_focus()
+        table.action_cursor_up()
+
+    def action_issue_down(self) -> None:
+        table = self.query_one("#issue-table", IssueTable)
+        if self._nav_index != self._NAV_ROWS:
+            self._nav_index = self._NAV_ROWS
+            self._apply_nav_focus()
+        table.action_cursor_down()
 
     def action_back(self) -> None:
         if self._showing_detail:

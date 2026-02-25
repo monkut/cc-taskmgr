@@ -5,7 +5,6 @@ Screen {
 /* In-progress bar */
 InProgressBar {
     height: auto;
-    dock: top;
     background: $boost;
     border-bottom: solid $accent;
 }
