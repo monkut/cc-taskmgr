@@ -43,6 +43,14 @@ On first launch, Tony prompts for your GitHub username and (optionally) local pr
 | `Escape` | Back to issue list (from detail view) |
 | `q` | Quit |
 
+### In Progress Bar
+
+The In Progress bar appears below the filter bar and tracks issues that have an `action:*` label (i.e., issues with a running or previously-run `askcc` action). It displays:
+
+- **Summary line** — lists repositories with in-progress issue counts (e.g. `org/repo (2)`). Click a repo to expand.
+- **Detail view** — when a repo is expanded, shows each issue's number, title, action mode, project column status, and link.
+- **Polling** — every 60 seconds, fetches the GitHub ProjectV2 Status field for in-progress issues and displays the current column name (e.g. `In Progress`, `In Review`).
+
 ### Filtering
 
 Use the **Org** and **Project** dropdowns in the filter bar to narrow issues by organization or GitHub Project V2.
@@ -52,7 +60,7 @@ Use the **Org** and **Project** dropdowns in the filter bar to narrow issues by 
 Select an issue and press `Enter` to view details including body, labels, and comments. From the detail view you can:
 
 - **Post a comment** via the comment input
-- **Execute Action** — launches an `askcc` agent mode (`plan`, `develop`, `review`, `explore`, `diagnose`) against the issue. Requires `askcc` on PATH and a matching local project directory configured in Settings.
+- **Execute Action** — launches an `askcc` agent mode (`plan`, `develop`, `review`, `explore`, `diagnose`, `automated`) against the issue. Requires `askcc` on PATH and a matching local project directory configured in Settings. The `automated` mode runs `plan` → `develop` → `review` in sequence, stopping early if the issue reaches an `in-review` or `in-internal-review` project column.
 
 ## Project Structure
 
@@ -70,6 +78,7 @@ tony/
 │   └── confirm_action.py   # Action confirmation modal
 └── widgets/
     ├── filters.py      # Org/Project filter bar
+    ├── in_progress.py  # In Progress bar (action-labeled issues + polling)
     ├── issue_table.py  # Sortable issue DataTable
     └── issue_detail.py # Issue detail view with comments
 ```
