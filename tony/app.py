@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import time
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -28,6 +29,7 @@ from tony.screens.confirm_action import ConfirmActionScreen
 from tony.screens.settings import SettingsScreen
 from tony.widgets.filters import FilterBar
 from tony.widgets.in_progress import InProgressBar
+from tony.widgets.in_progress_detail import ActionEntry, InProgressDetail
 from tony.widgets.issue_detail import IssueDetail
 from tony.widgets.issue_table import SORTABLE_COLUMNS, IssueTable
 
@@ -67,6 +69,10 @@ class TonyApp(App):
         self._nav_index: int = self._NAV_ROWS
         self._running_actions: dict[str, subprocess.Popen] = {}
         self._running_action_modes: dict[str, str] = {}
+        self._action_start_times: dict[str, float] = {}
+        self._action_issues: dict[str, Issue] = {}
+        self._recently_finished: dict[str, tuple[str, float]] = {}  # key → (mode, finished_monotonic)
+        self._showing_in_progress: bool = False
         self._initial_load_done: bool = False
         self._status_text: str = ""
 
@@ -76,11 +82,13 @@ class TonyApp(App):
         yield InProgressBar(id="in-progress")
         yield IssueTable(id="issue-table")
         yield IssueDetail(id="issue-detail")
+        yield InProgressDetail(id="in-progress-detail")
         yield Static("", id="status-bar")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#issue-detail", IssueDetail).display = False
+        self.query_one("#in-progress-detail", InProgressDetail).display = False
 
         if not check_gh_auth():
             self._set_status("[red]gh CLI not authenticated. Run: gh auth login[/red]")
@@ -226,14 +234,17 @@ class TonyApp(App):
 
     def _show_detail(self, issue: Issue) -> None:
         self._showing_detail = True
+        self._showing_in_progress = False
         table = self.query_one("#issue-table", IssueTable)
         filters = self.query_one("#filters", FilterBar)
         in_progress = self.query_one("#in-progress", InProgressBar)
+        ip_detail = self.query_one("#in-progress-detail", InProgressDetail)
         detail = self.query_one("#issue-detail", IssueDetail)
 
         table.display = False
         filters.display = False
         in_progress.display = False
+        ip_detail.display = False
         detail.display = True
         detail.display_issue(issue)
         self._update_action_status_for_issue(issue)
@@ -320,6 +331,17 @@ class TonyApp(App):
         else:
             self.run_worker(self._execute_action(mode, issue))
 
+    def _resolve_action_cwd(self, issue: Issue) -> str | None:
+        repo_dir = find_repo_dir(self._config.project_dirs, issue.repo)
+        if not repo_dir:
+            self.notify(
+                f"Related repository, {issue.repository}, NOT found, cannot run EXECUTE ACTION",
+                severity="error",
+                timeout=10,
+            )
+            return None
+        return str(repo_dir)
+
     async def _execute_action(self, mode: str, issue: Issue) -> None:
         key = f"{issue.repository}#{issue.number}"
 
@@ -330,15 +352,8 @@ class TonyApp(App):
             self.notify("Rate limited adding label", severity="error")
             return
 
-        # Resolve working directory
-        repo_dir = find_repo_dir(self._config.project_dirs, issue.repo)
-        cwd = str(repo_dir) if repo_dir else None
+        cwd = self._resolve_action_cwd(issue)
         if not cwd:
-            self.notify(
-                f"Related repository, {issue.repository}, NOT found, cannot run EXECUTE ACTION",
-                severity="error",
-                timeout=10,
-            )
             return
 
         # Launch subprocess in thread
@@ -351,6 +366,8 @@ class TonyApp(App):
 
         self._running_actions[key] = proc
         self._running_action_modes[key] = mode
+        self._action_start_times[key] = time.monotonic()
+        self._action_issues[key] = issue
         self._update_action_status_for_issue(issue)
         self._update_status_bar_actions()
         self._sync_table_running_actions()
@@ -359,8 +376,9 @@ class TonyApp(App):
         # Wait for completion in background thread
         await asyncio.to_thread(proc.wait)
 
+        finished_mode = self._running_action_modes.pop(key, mode)
         self._running_actions.pop(key, None)
-        self._running_action_modes.pop(key, None)
+        self._recently_finished[key] = (finished_mode, time.monotonic())
         self._update_action_status_for_issue(issue)
         self._update_status_bar_actions()
         self._sync_table_running_actions()
@@ -382,16 +400,12 @@ class TonyApp(App):
             self.notify("Rate limited adding label", severity="error")
             return
 
-        # Resolve working directory
-        repo_dir = find_repo_dir(self._config.project_dirs, issue.repo)
-        cwd = str(repo_dir) if repo_dir else None
+        cwd = self._resolve_action_cwd(issue)
         if not cwd:
-            self.notify(
-                f"Related repository, {issue.repository}, NOT found, cannot run EXECUTE ACTION",
-                severity="error",
-                timeout=10,
-            )
             return
+
+        self._action_start_times[key] = time.monotonic()
+        self._action_issues[key] = issue
 
         for step in steps:
             # Check if already in review before starting step
@@ -437,7 +451,8 @@ class TonyApp(App):
 
         # Cleanup
         self._running_actions.pop(key, None)
-        self._running_action_modes.pop(key, None)
+        finished_mode = self._running_action_modes.pop(key, "automated")
+        self._recently_finished[key] = (finished_mode, time.monotonic())
         self._update_action_status_for_issue(issue)
         self._update_status_bar_actions()
         self._sync_table_running_actions()
@@ -466,6 +481,87 @@ class TonyApp(App):
                 logger.warning(f"Rate limited polling status for {issue.repository}#{issue.number}")
 
         in_progress.update_statuses(statuses)
+
+    def _build_action_entries(self) -> list[ActionEntry]:
+        """Build list of running + recently-finished (<=30 min) action entries."""
+        now = time.monotonic()
+        cutoff = now - 30 * 60
+        entries: list[ActionEntry] = []
+
+        # Running actions
+        for key, mode in self._running_action_modes.items():
+            issue = self._action_issues.get(key)
+            if issue:
+                entries.append(
+                    ActionEntry(
+                        issue=issue,
+                        mode=mode,
+                        started_at=self._action_start_times.get(key, now),
+                        finished_at=None,
+                    )
+                )
+
+        # Recently finished
+        expired = []
+        for key, (mode, finished_at) in self._recently_finished.items():
+            if finished_at < cutoff:
+                expired.append(key)
+                continue
+            issue = self._action_issues.get(key)
+            if issue:
+                entries.append(
+                    ActionEntry(
+                        issue=issue,
+                        mode=mode,
+                        started_at=self._action_start_times.get(key, finished_at),
+                        finished_at=finished_at,
+                    )
+                )
+
+        # Clean up expired entries
+        for key in expired:
+            self._recently_finished.pop(key)
+            self._action_issues.pop(key, None)
+            self._action_start_times.pop(key, None)
+
+        return entries
+
+    def on_in_progress_bar_detail_requested(self, _event: InProgressBar.DetailRequested) -> None:
+        self._show_in_progress_detail()
+
+    def _show_in_progress_detail(self) -> None:
+        self._showing_in_progress = True
+        table = self.query_one("#issue-table", IssueTable)
+        filters = self.query_one("#filters", FilterBar)
+        in_progress = self.query_one("#in-progress", InProgressBar)
+        detail = self.query_one("#in-progress-detail", InProgressDetail)
+
+        table.display = False
+        filters.display = False
+        in_progress.display = False
+        detail.display = True
+        detail.update_entries(self._build_action_entries())
+        self._set_status("In Progress — Detail View")
+
+    def on_in_progress_detail_back_requested(self, _event: InProgressDetail.BackRequested) -> None:
+        self._show_list_from_in_progress()
+
+    def on_in_progress_detail_issue_selected(self, event: InProgressDetail.IssueSelected) -> None:
+        self._show_list_from_in_progress()
+        self._show_detail(event.issue)
+
+    def _show_list_from_in_progress(self) -> None:
+        self._showing_in_progress = False
+        detail = self.query_one("#in-progress-detail", InProgressDetail)
+        table = self.query_one("#issue-table", IssueTable)
+        filters = self.query_one("#filters", FilterBar)
+        in_progress = self.query_one("#in-progress", InProgressBar)
+
+        detail.display = False
+        in_progress.display = True
+        in_progress.update_issues(self._issues)
+        filters.display = True
+        table.display = True
 
     def _update_action_status_for_issue(self, issue: Issue) -> None:
         if not self._showing_detail:
@@ -534,7 +630,7 @@ class TonyApp(App):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in ("issue_up", "issue_down"):
-            return not self._showing_detail
+            return not self._showing_detail and not self._showing_in_progress
         return True
 
     def action_issue_up(self) -> None:
@@ -554,6 +650,8 @@ class TonyApp(App):
     def action_back(self) -> None:
         if self._showing_detail:
             self._show_list()
+        elif self._showing_in_progress:
+            self._show_list_from_in_progress()
 
     def _set_status(self, message: str) -> None:
         self._status_text = message

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
 
@@ -22,6 +23,9 @@ def _extract_action(issue: Issue) -> str:
 
 class InProgressBar(Widget):
     """Shows issues with action:* labels grouped by repository."""
+
+    class DetailRequested(Message):
+        pass
 
     can_focus = False
 
@@ -57,8 +61,9 @@ class InProgressBar(Widget):
 
     def _render_summary(self) -> None:
         summary = self.query_one("#in-progress-summary", Static)
+        label = "[@click=open_detail][bold yellow]In Progress:[/bold yellow][/]"
         if not self._repo_list:
-            summary.update("[bold yellow]In Progress:[/bold yellow]  [dim]None[/dim]")
+            summary.update(f"{label}  [dim]None[/dim]")
             return
         parts = []
         for i, repo in enumerate(self._repo_list):
@@ -67,7 +72,10 @@ class InProgressBar(Widget):
                 parts.append(f"[@click=select_repo({i})][bold reverse] {repo} ({count}) [/bold reverse][/]")
             else:
                 parts.append(f"[@click=select_repo({i})][bold] {repo} ({count}) [/bold][/]")
-        summary.update("[bold yellow]In Progress:[/bold yellow]  " + "  ".join(parts))
+        summary.update(f"{label}  " + "  ".join(parts))
+
+    def action_open_detail(self) -> None:
+        self.post_message(self.DetailRequested())
 
     def action_select_repo(self, index: int) -> None:
         """Handle click on a repo entry in the summary."""
